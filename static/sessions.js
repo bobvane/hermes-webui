@@ -460,23 +460,7 @@ async function newSession(flash, options={}){
     const switchWs=S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
     const inheritWs=switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null);
-    // Use the saved default model for new sessions (#872). The user's saved
-    // default_model (from Settings) takes priority over the chat-header dropdown
-    // value, which reflects the *previous* session's model. Fall back to the
-    // dropdown value only when no default_model is configured.
-    const modelSel=$('modelSelect');
-    const selectedDefaultModel=window._defaultModel||(modelSel&&modelSel.value)||'';
-    let defaultApplied=false;
-    if(window._defaultModel&&modelSel&&typeof _applyModelToDropdown==='function'){
-      defaultApplied=!!_applyModelToDropdown(window._defaultModel,modelSel,window._activeProvider||null);
-    }
-    const canQualify=!window._defaultModel||defaultApplied||(modelSel&&modelSel.value===selectedDefaultModel);
-    const newModelState=(canQualify&&typeof _modelStateForSelect==='function')
-      ? _modelStateForSelect(modelSel,selectedDefaultModel)
-      : {model:selectedDefaultModel,model_provider:null};
     const reqBody={
-      model:newModelState.model,
-      model_provider:newModelState.model_provider||null,
       workspace:inheritWs,
       profile:S.activeProfile||'default',
     };
