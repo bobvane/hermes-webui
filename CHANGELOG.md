@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Prevent `/api/session` display merges from appending restamped `state.db` replay rows after the sidecar tail when those rows are already visible in the sidecar. This keeps compressed sessions from appearing to end on an old user prompt even though the assistant answer is persisted earlier in the transcript.
 
 ## [v0.51.105] — 2026-05-21 — Release CC (stage-398 — 4-PR batch — hide suggestions preference + Docker agent version from copied source + runner-local adapter selection + configurable pinned session limit)
 
