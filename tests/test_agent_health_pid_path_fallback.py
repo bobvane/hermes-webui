@@ -18,6 +18,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("hermes_constants", reason="hermes-agent not installed")
+
 
 def _call(monkeypatch, root: Path, profile_dir: Path | None = None) -> Path | None:
     """Call _gateway_root_pid_path() with mocked filesystem roots."""
