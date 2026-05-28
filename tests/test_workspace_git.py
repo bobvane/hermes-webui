@@ -31,7 +31,7 @@ def _git(cwd, *args):
 
 def _init_repo(path):
     path.mkdir(parents=True, exist_ok=True)
-    _git(path, "init")
+    _git(path, "init", "-b", "master")
     _git(path, "config", "user.email", "hermes-tests@example.invalid")
     _git(path, "config", "user.name", "Hermes Tests")
     return path
@@ -511,6 +511,7 @@ def test_git_fetch_pull_and_push_with_upstream(tmp_path):
     _commit_all(origin)
     _git(origin, "remote", "add", "origin", str(remote))
     _git(origin, "push", "-u", "origin", "HEAD")
+    _git(remote, "symbolic-ref", "HEAD", "refs/heads/master")
 
     clone = tmp_path / "clone"
     _git(tmp_path, "clone", str(remote), str(clone))

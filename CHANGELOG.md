@@ -3,6 +3,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Hardened WebUI request/session/runtime edges: malformed request body lengths are rejected before reads, session writes reject unsafe IDs, auth session/login-attempt maps avoid unsynchronized mutation, and successful password login clears stale rate-limit failures.
+- Hardened frontend startup and navigation fallbacks: early storage access now survives blocked `localStorage`, stale session recovery preserves subpath mounts, session URL generation removes both legacy session query aliases, canceling a stream closes the local EventSource, and the PWA shell precaches same-origin markdown/KaTeX vendor assets.
+- Added missing i18n keys used by command, cron, provider, search/default, and session-rename UI paths across supported locales so missing translations fall back to labels instead of raw key names.
+- Made workspace Git tests pin their temporary repository branch to `master` so the suite is independent of the host Git default-branch setting.
+
 ## [v0.51.152] — 2026-05-28 — Release DX (stage-batch34 — single-PR optional gateway-backed browser chat)
 
 ### Added
