@@ -43,17 +43,28 @@ from api.session_events import (
 logger = logging.getLogger(__name__)
 
 
-def _publish_session_list_changed(reason: str, *, profile: str | None = None) -> None:
-    """Publish profile-scoped session changes while tolerating legacy test doubles."""
-    if not profile:
+def _publish_session_list_changed(
+    reason: str,
+    *,
+    profile: str | None = None,
+    session_id: str | None = None,
+) -> None:
+    """Publish scoped session changes while tolerating legacy test doubles."""
+    if not profile and not session_id:
         publish_session_list_changed(reason)
         return
     try:
-        publish_session_list_changed(reason, profile=profile)
+        publish_session_list_changed(reason, profile=profile, session_id=session_id)
     except TypeError:
         # Some focused tests monkeypatch the route-level publisher with the
-        # historical one-argument shape. Preserve the old signal instead of
+        # historical one-argument or profile-only shape. Preserve the old signal instead of
         # turning unrelated session mutations into 500s.
+        if profile:
+            try:
+                publish_session_list_changed(reason, profile=profile)
+                return
+            except TypeError:
+                pass
         publish_session_list_changed(reason)
 
 
@@ -126,7 +137,11 @@ def _persist_generated_session_title(
             while len(SESSIONS) > SESSIONS_MAX:
                 SESSIONS.popitem(last=False)
     _sync_session_title_to_insights(session)
-    _publish_session_list_changed(event_reason, profile=getattr(session, "profile", None))
+    _publish_session_list_changed(
+        event_reason,
+        profile=getattr(session, "profile", None),
+        session_id=sid,
+    )
     if original_session is not session:
         original_session.title = session.title
         original_session.llm_title_generated = session.llm_title_generated
@@ -8005,7 +8020,11 @@ def handle_post(handler, parsed) -> bool:
             worktree_info=worktree_info,
         )
         if worktree_info:
-            publish_session_list_changed("session_new", profile=getattr(s, "profile", None))
+            publish_session_list_changed(
+                "session_new",
+                profile=getattr(s, "profile", None),
+                session_id=getattr(s, "session_id", None),
+            )
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
     if parsed.path == "/api/session/duplicate":
@@ -8087,7 +8106,11 @@ def handle_post(handler, parsed) -> bool:
             # Without this explicit save, the duplicate is in-memory only — if the user
             # refreshes before sending a turn, the duplicate vanishes.
             copied_session.save()
-            publish_session_list_changed("session_duplicate", profile=getattr(copied_session, "profile", None))
+            publish_session_list_changed(
+                "session_duplicate",
+                profile=getattr(copied_session, "profile", None),
+                session_id=getattr(copied_session, "session_id", None),
+            )
 
             return j(handler, {"session": copied_session.compact() | {"messages": copied_session.messages}})
         except Exception as e:
@@ -8222,7 +8245,11 @@ def handle_post(handler, parsed) -> bool:
             apply_session_title_rename(s, body["title"])
             s.save()
         _sync_session_title_to_insights(s)
-        publish_session_list_changed("session_rename", profile=getattr(s, "profile", None))
+        publish_session_list_changed(
+            "session_rename",
+            profile=getattr(s, "profile", None),
+            session_id=getattr(s, "session_id", body["session_id"]),
+        )
         return j(handler, {"session": s.compact()})
 
 
@@ -8718,7 +8745,11 @@ def handle_post(handler, parsed) -> bool:
         # Persist only if there are messages (matches new_session pattern)
         if forked_messages:
             branch.save()
-            publish_session_list_changed("session_branch", profile=getattr(branch, "profile", None))
+            publish_session_list_changed(
+                "session_branch",
+                profile=getattr(branch, "profile", None),
+                session_id=getattr(branch, "session_id", None),
+            )
 
         return j(handler, {
             "session_id": branch.session_id,
@@ -9310,7 +9341,11 @@ def handle_post(handler, parsed) -> bool:
             with _get_session_agent_lock(body["session_id"]):
                 s.pinned = pin_requested
                 s.save()
-        publish_session_list_changed("session_pin", profile=getattr(s, "profile", None))
+        publish_session_list_changed(
+            "session_pin",
+            profile=getattr(s, "profile", None),
+            session_id=getattr(s, "session_id", body["session_id"]),
+        )
         return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Session archive (POST) ──
@@ -9387,7 +9422,11 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(sid):
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
-        publish_session_list_changed("session_archive", profile=getattr(s, "profile", None))
+        publish_session_list_changed(
+            "session_archive",
+            profile=getattr(s, "profile", None),
+            session_id=getattr(s, "session_id", sid),
+        )
         return j(handler, {"ok": True, "session": s.compact(), **_worktree_retained_payload(s)})
 
     # ── Session move to project (POST) ──
@@ -9441,7 +9480,11 @@ def handle_post(handler, parsed) -> bool:
             s.save()
         finally:
             _move_lock.release()
-        publish_session_list_changed("session_move", profile=getattr(s, "profile", None))
+        publish_session_list_changed(
+            "session_move",
+            profile=getattr(s, "profile", None),
+            session_id=getattr(s, "session_id", body["session_id"]),
+        )
         return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Project CRUD (POST) ──
@@ -12623,15 +12666,37 @@ def _project_context_git_root(start: Path) -> Path | None:
 
 
 def _project_context_candidates(workspace: Path) -> list[Path]:
-    """Mirror the agent's first-match project context file priority."""
+    """Mirror the agent's first-match project context file priority.
+
+    #4164: in a non-git workspace the agent's ``_find_hermes_md`` walks all
+    the way up to filesystem root because its ``stop_at = git_root`` is
+    ``None`` — so a workspace at ``/tmp/x/project/subdir`` could surface
+    ``/tmp/x/HERMES.md`` (a file *outside* the user's workspace) in the
+    Project Context tab.
+
+    The WebUI tab is a read-only mirror of what the agent injects, so the
+    safest bound that does not over-promise is: when there is no git root,
+    treat the workspace itself as the stop boundary. The cwd is still
+    scanned (preserving the in-workspace AGENTS.md / HERMES.md behavior),
+    but we no longer walk into the user's home directory or ``/tmp``.
+
+    The agent-side walk in ``agent/prompt_builder._find_hermes_md`` should
+    be bounded the same way for full parity; until that ships the WebUI
+    will under-report context files that live *above* a non-git workspace,
+    which is strictly less surprising than over-reporting them.
+    """
     cwd = workspace.resolve()
     candidates: list[Path] = []
-    stop_at = _project_context_git_root(cwd)
+    git_root = _project_context_git_root(cwd)
+    # When inside a git tree, walk up to the git root as before. When not,
+    # bound the walk at the workspace itself so we never surface files
+    # above the user's workspace.
+    stop_at = git_root if git_root is not None else cwd
 
     for directory in [cwd, *cwd.parents]:
         for name in _PROJECT_CONTEXT_HERMES_NAMES:
             candidates.append(directory / name)
-        if stop_at and directory == stop_at:
+        if directory == stop_at:
             break
 
     for name in _PROJECT_CONTEXT_CWD_NAMES:
@@ -13241,7 +13306,11 @@ def _start_chat_stream_for_session(
                     "_status": 409,
                 }
     if was_hidden_empty_session:
-        publish_session_list_changed("session_new", profile=getattr(s, "profile", None))
+        publish_session_list_changed(
+            "session_new",
+            profile=getattr(s, "profile", None),
+            session_id=getattr(s, "session_id", None),
+        )
     diag.stage("turn_journal_submitted") if diag else None
     journal_event = {}
     try:
@@ -14723,6 +14792,13 @@ def _handle_file_delete(handler, body):
     try:
         ws_root = Path(s.workspace)
         target = safe_resolve(ws_root, body["path"])
+        # Reject a symlinked entry BEFORE the follow-based exists() check: a
+        # dangling symlink resolves to a missing target, so an exists()-first
+        # order would misclassify it as 404 "File not found" and leave it
+        # permanently undeletable. is_symlink() is a no-follow lstat on the
+        # lexically-requested path, so it catches both live and dangling links.
+        if (ws_root / body["path"]).is_symlink():
+            return bad(handler, "Cannot delete a symlinked entry")
         if not target.exists():
             return bad(handler, "File not found", 404)
         if target.is_dir():
@@ -14803,6 +14879,11 @@ def _handle_file_rename(handler, body):
         ws_root = Path(s.workspace)
         ws_root_resolved = ws_root.resolve()
         source = safe_resolve(ws_root, body["path"])
+        # Reject a symlinked entry BEFORE the follow-based exists() check (see
+        # _handle_file_delete): a dangling symlink would otherwise 404 and stay
+        # unrenameable. is_symlink() is a no-follow lstat on the requested path.
+        if (ws_root / body["path"]).is_symlink():
+            return bad(handler, "Cannot rename a symlinked entry")
         if not source.exists():
             return bad(handler, "File not found", 404)
         new_name = body["new_name"].strip()
@@ -14838,15 +14919,18 @@ def _handle_file_move(handler, body):
         # returning a confusing 400 for a move that actually happened.
         ws_root_resolved = ws_root.resolve()
         source = safe_resolve(ws_root, body["path"])
-        if not source.exists():
-            return bad(handler, "File not found", 404)
-        # Reject a symlinked SOURCE entry. safe_resolve() follows the final
-        # symlink, so source.name/source.parent would point at the link's
-        # TARGET, not the dragged entry — moving link.txt would silently move
-        # dir/real.txt and leave link.txt dangling. Detect the symlink on the
-        # lexically-requested final component (lstat, no-follow) and refuse.
+        # Reject a symlinked SOURCE entry BEFORE the follow-based exists() check.
+        # safe_resolve() follows the final symlink, so source.name/source.parent
+        # would point at the link's TARGET, not the dragged entry — moving
+        # link.txt would silently move dir/real.txt and leave link.txt dangling.
+        # Detect the symlink on the lexically-requested final component (lstat,
+        # no-follow) and refuse; running this before exists() also means a
+        # dangling symlink is rejected (400) rather than misclassified as 404
+        # (matches the delete/rename ordering).
         if (ws_root / body["path"]).is_symlink():
             return bad(handler, "Cannot move a symlinked entry")
+        if not source.exists():
+            return bad(handler, "File not found", 404)
         dest_dir_raw = (body.get("dest_dir") or ".").strip()
         if not dest_dir_raw:
             dest_dir_raw = "."

@@ -3,6 +3,46 @@
 
 ## [Unreleased]
 
+## [v0.51.432] — 2026-06-15 — Release OS (TUI sessions discoverable in the sidebar)
+
+### Fixed
+
+- **TUI sessions now show up in the sidebar like CLI sessions do.** The session source-classification only recognized `cli` (and friends), so `tui`-sourced sessions weren't tagged as CLI-origin and could be filtered out or mislabeled. `tui` is now treated alongside `cli` everywhere the source is classified, and a TUI continuation tip keeps the navigation pointed at the latest tip with its visible TUI title (rather than an opaque compression-snapshot title), so the newest TUI conversation is findable by name. (#4213)
+
+## [v0.51.431] — 2026-06-15 — Release OR (make request logging non-fatal)
+
+### Fixed
+
+- **A closed or redirected stdout/stderr stream can no longer abort an HTTP response before it's sent.** Request/access logging and request-error logging now route through a small guarded print helper, so if agent or tool code redirects or closes the process-wide output streams in another thread, the log write is swallowed instead of raising mid-response. Real handler errors are unaffected — the error message and traceback are still built and still surface a 500; only the log I/O is guarded, and `KeyboardInterrupt`/`SystemExit` still propagate. (#4188)
+
+## [v0.51.430] — 2026-06-15 — Release OQ (session-list-changed events carry the changed session id)
+
+### Changed
+
+- **Session-list invalidation events can now carry the specific `session_id` that changed.** `publish_session_list_changed(...)` and the `/api/sessions/events` SSE payload gained an optional `session_id` (defaulting to none, so the broad-refresh behavior is unchanged and backward-compatible). The frontend uses it to tell whether an event targets the currently-open session, refining the refresh signal instead of always doing a broad sidebar refresh. Profile scoping and the legacy one-argument publish shape are preserved. (#4221)
+
+## [v0.51.429] — 2026-06-15 — Release OP (preserve multiple messageful imported/CLI sessions in the sidebar)
+
+### Fixed
+
+- **Multiple imported / CLI sessions that share a lineage with a fuller pre-compression snapshot are no longer collapsed out of the sidebar.** The sidebar's "prefer the fuller snapshot" grouping would hide continuation rows behind a single snapshot even when several of those rows actually have their own messages — making real sessions undiscoverable. Now, when more than one messageful session shares the lineage, the continuations are kept visible; the single-inactive-continuation replacement and the fuller-snapshot preference (when only one row has messages) are unchanged. (#4218)
+
+## [v0.51.428] — 2026-06-15 — Release OO (bound non-git project-context file walk, #4164)
+
+### Fixed
+
+- **The Project Context tab no longer surfaces `AGENTS.md` / `HERMES.md` / `CLAUDE.md` files from ABOVE a non-git workspace.** When a workspace isn't a git repo, the context-file walk had no stop boundary and climbed to the filesystem root, so a file in a parent directory (e.g. `/tmp/HERMES.md` or one in your home dir) could appear in the tab even though it's outside the workspace. The walk is now bounded at the workspace root when there's no git root (the cwd is still scanned, preserving in-workspace context files). A matching bound on the agent-side walk is a tracked follow-up; until then the WebUI may under-report context files that live above a non-git workspace, which is strictly safer than over-reporting them. (#4164)
+
+## [v0.51.427] — 2026-06-15 — Release ON (CLI sessions on by default for new installs #3988 + symlink delete/rename guard #4217)
+
+### Changed
+
+- **CLI / TUI / messaging sessions now appear in the sidebar by default for new installs (#3988).** `show_cli_sessions` now defaults to `True`, so sessions from the CLI, TUI, Telegram, Discord, and the Hermes One desktop app show up in the WebUI sidebar without users having to discover the toggle in Settings. **Existing installs are grandfathered:** a user who already completed onboarding and never opted in keeps their previous (hidden) behavior — the default change only affects fresh installs. The toggle remains in Settings → Sessions for anyone who wants to change it.
+
+### Fixed
+
+- **Deleting or renaming a workspace symlink no longer destroys the file or directory it points to (#4217).** `/api/file/delete` and `/api/file/rename` resolved the final symlink before operating on the target, so a standard delete/rename against a symlink name acted on the real (possibly out-of-workspace) target. Both handlers now reject a symlinked path with a 400, matching the guard the move handler already had. (#4217)
+
 ## [v0.51.426] — 2026-06-15 — Release OM (custom-provider model-prefix routing fix, #4210)
 
 ### Fixed
