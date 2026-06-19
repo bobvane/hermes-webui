@@ -2771,9 +2771,12 @@ async function submitKanbanTaskModal(){
     if (titleEl) titleEl.focus();
     return;
   }
-  // Validate workspace path for non-scratch workspace kinds
+  // Build payload — for create we omit defaulted fields so the backend chooses;
+  // for edit we send every field so users can clear assignee/tenant/body.
+  const isEdit = _kanbanTaskModalMode === 'edit';
+  // Validate workspace path for non-scratch workspace kinds (create mode only)
   const workspaceKind = workspaceKindEl ? workspaceKindEl.value : 'scratch';
-  if (workspaceKind !== 'scratch') {
+  if (!isEdit && workspaceKind !== 'scratch') {
     const workspacePath = workspacePathEl ? workspacePathEl.value.trim() : '';
     if (!workspacePath) {
       if (errEl) errEl.textContent = t('kanban_workspace_path_required') || 'Workspace path is required for non-scratch workspaces.';
@@ -2781,9 +2784,6 @@ async function submitKanbanTaskModal(){
       return;
     }
   }
-  // Build payload — for create we omit defaulted fields so the backend chooses;
-  // for edit we send every field so users can clear assignee/tenant/body.
-  const isEdit = _kanbanTaskModalMode === 'edit';
   const payload = {title};
   const bodyVal = bodyEl ? bodyEl.value : '';
   const assigneeVal = assigneeEl ? assigneeEl.value.trim() : '';

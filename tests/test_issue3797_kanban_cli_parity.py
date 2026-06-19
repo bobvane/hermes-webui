@@ -54,18 +54,17 @@ class TestWorkspacePathValidation:
     """Test client-side validation of workspace paths."""
 
     def test_submit_blocks_empty_worktree_path(self):
-        """submitKanbanTaskModal must reject non-scratch workspaces with empty paths."""
-        # The function must check if workspace_kind is not 'scratch' and
-        # workspace_path is empty, then set error and return early
-        assert 'if (workspaceKind !== \'scratch\')' in PANELS_JS
+        """submitKanbanTaskModal must reject non-scratch workspaces with empty paths on create."""
+        # The validation must skip edit mode and only fire on create
+        assert "workspaceKind !== 'scratch'" in PANELS_JS
         assert "kanban_workspace_path_required" in PANELS_JS
         # Must call focus() on the path input for UX
         assert "workspacePathEl.focus()" in PANELS_JS
 
     def test_submit_accepts_scratch_without_path(self):
         """submitKanbanTaskModal must accept scratch workspace even without a path."""
-        # When workspace_kind === 'scratch', skip path validation
-        assert "if (workspaceKind !== 'scratch')" in PANELS_JS
+        # Validation is guarded by !isEdit so it only fires on create
+        assert "workspaceKind !== 'scratch'" in PANELS_JS
 
     def test_workspace_fields_sent_in_payload(self):
         """The create/edit payload must include workspace_kind and workspace_path on create only."""
