@@ -24,6 +24,8 @@ The fix:
 """
 
 import os
+import sys
+import types
 from pathlib import Path
 
 import api.config as config
@@ -216,17 +218,31 @@ def test_active_request_scope_prefers_profile_key_over_process_env_for_custom_pr
 
 def test_active_request_scope_sets_context_local_hermes_home(monkeypatch, tmp_path):
     """Request scope keeps agent-side Hermes-home readers on the active profile."""
-    from hermes_constants import get_hermes_home
-
     base = tmp_path / ".hermes"
     work_home = base / "profiles" / "work"
     work_home.mkdir(parents=True)
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    current_home = {"value": None}
+
+    fake_constants = types.SimpleNamespace()
+
+    def _set_override(path):
+        previous = current_home["value"]
+        current_home["value"] = Path(path)
+        return previous
+
+    def _reset_override(token):
+        current_home["value"] = token
+
+    fake_constants.set_hermes_home_override = _set_override
+    fake_constants.reset_hermes_home_override = _reset_override
+    fake_constants.get_hermes_home = lambda: current_home["value"]
+    monkeypatch.setitem(sys.modules, "hermes_constants", fake_constants)
 
     profiles.set_request_profile("work")
     try:
         with profiles.profile_env_for_active_request_readonly("test"):
-            assert get_hermes_home() == work_home
+            assert fake_constants.get_hermes_home() == work_home
     finally:
         profiles.clear_request_profile()
 

@@ -928,10 +928,6 @@ def profile_env_for_active_request_readonly(
         return
     try:
         from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
-        from hermes_constants import (
-            reset_hermes_home_override,
-            set_hermes_home_override,
-        )
         profile_home_path = Path(get_hermes_home_for_profile(profile))
         runtime_env = get_profile_runtime_env(profile_home_path)
         safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
@@ -946,6 +942,14 @@ def profile_env_for_active_request_readonly(
         )
         yield
         return
+    try:
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+    except Exception:
+        reset_hermes_home_override = None
+        set_hermes_home_override = None
 
     thread_env = dict(safe_runtime_env)
     thread_env["HERMES_HOME"] = str(profile_home_path)
@@ -957,10 +961,11 @@ def profile_env_for_active_request_readonly(
     try:
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
-        home_override_token = set_hermes_home_override(profile_home_path)
+        if set_hermes_home_override is not None:
+            home_override_token = set_hermes_home_override(profile_home_path)
         yield
     finally:
-        if home_override_token is not None:
+        if home_override_token is not None and reset_hermes_home_override is not None:
             reset_hermes_home_override(home_override_token)
         _thread_ctx.block_process_env_fallback = previous_block_process_env
         if previous_thread_env:
