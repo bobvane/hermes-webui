@@ -5235,6 +5235,18 @@ def merge_session_messages_append_only(
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
     state_replay_idx = 0
     skipped_state_visible_counts = {}
+    # Loop-invariant: a session whose original truncate cutoff (truncation_boundary)
+    # is strictly below the watermark is genuinely ADVANCED (a new turn was
+    # committed after the edit). In that state post-watermark state.db rows are
+    # legitimate post-edit content, even when the sidecar's newest row only
+    # EQUALS the watermark (the post-edit user is checkpointed but its assistant
+    # reply exists only in state.db). Conservative for boundary None / == watermark.
+    boundary_ts = _message_timestamp_as_float({"timestamp": truncation_boundary})
+    watermark_advanced_by_boundary = (
+        watermark_timestamp is not None
+        and boundary_ts is not None
+        and boundary_ts < watermark_timestamp
+    )
     for msg in state_messages:
         timestamp = _message_timestamp_as_float(msg)
         key = _session_message_merge_key(msg)
@@ -5271,10 +5283,23 @@ def merge_session_messages_append_only(
         # rows once the session moves forward past the edit boundary. Once the
         # sidecar's own max timestamp is beyond the watermark (the session has
         # advanced), allow state rows newer than the sidecar tail to merge.
+        #
+        # The sidecar's max timestamp can also EQUAL the watermark when the new
+        # post-edit USER turn has been checkpointed into the sidecar (its
+        # timestamp == the advanced watermark) but its ASSISTANT reply exists
+        # only in state.db (recovery before the sidecar tail advances). In that
+        # state truncation_boundary < watermark proves the session is genuinely
+        # advanced, so the post-watermark state-only reply is legitimate
+        # post-edit content and must merge through (not be dropped as a replaced
+        # tail). The conservative skip still applies for boundary is None and
+        # boundary == watermark (not-advanced / legacy).
         sidecar_advanced_past_watermark = (
             watermark_timestamp is not None
-            and max_sidecar_timestamp is not None
-            and max_sidecar_timestamp > watermark_timestamp
+            and (
+                (max_sidecar_timestamp is not None
+                 and max_sidecar_timestamp > watermark_timestamp)
+                or watermark_advanced_by_boundary
+            )
         )
         if (
             watermark_timestamp is not None

@@ -153,6 +153,46 @@ def test_core_a_legacy_none_boundary_frozen_watermark_does_not_resurrect():
     )
 
 
+def test_advanced_sidecar_at_watermark_keeps_state_only_post_edit_reply():
+    """Non-empty sidecar whose newest row EQUALS the watermark (the post-edit
+    user turn is checkpointed but its assistant reply exists only in state.db)
+    must keep the state-only post-edit reply when the session is genuinely
+    advanced (truncation_boundary < watermark).
+
+    Opus/Codex gate found that the `sidecar_advanced_past_watermark` guard only
+    treated `max_sidecar_timestamp > watermark` as advanced, so a reply at
+    ts > watermark was dropped whenever the sidecar tail merely EQUALLED the
+    watermark — silently losing the legitimate post-edit assistant reply on
+    restore/full reload. The boundary < watermark signal now also marks the
+    session advanced."""
+    # boundary @51 (original cutoff), watermark advanced to @200 (new user turn),
+    # sidecar holds the prefix + the committed edited user @200 (== watermark),
+    # state.db additionally holds the post-edit assistant reply @201 (state-only).
+    sidecar = [
+        _msg("user", "first", 50.0),
+        _msg("assistant", "first reply", 51.0),
+        _msg("user", "edited prompt", 200.0),
+    ]
+    state = [
+        _msg("user", "first", 50.0),
+        _msg("assistant", "first reply", 51.0),
+        _msg("user", "edited prompt", 200.0),
+        _msg("assistant", "post-edit reply", 201.0),
+    ]
+
+    merged = models.merge_session_messages_append_only(
+        sidecar, state, truncation_watermark=200.0, truncation_boundary=51.0
+    )
+
+    contents = [m["content"] for m in merged]
+    assert "post-edit reply" in contents, (
+        f"State-only post-edit assistant reply was DROPPED! Contents: {contents}"
+    )
+    assert contents == ["first", "first reply", "edited prompt", "post-edit reply"], (
+        f"Expected full advanced transcript, got {contents}"
+    )
+
+
 # ─── Same-second assistant reply dropped ──────────────────────────────────────
 
 
