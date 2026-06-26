@@ -18263,7 +18263,13 @@ def _handle_chat_sync(handler, body):
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=get_config()),
+                conversation_history=_sanitize_messages_for_api(
+                    _previous_context_messages,
+                    cfg=get_config(),
+                    effective_model=_model,
+                    effective_provider=_provider,
+                    effective_base_url=_base_url,
+                ),
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
