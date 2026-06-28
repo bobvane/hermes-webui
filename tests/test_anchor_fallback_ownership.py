@@ -46,11 +46,17 @@ def _run_node_script(script: str) -> str:
         pytest.skip("node executable is required for JavaScript behavior checks")
     result = subprocess.run(
         [node, "-e", script],
-        check=True,
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
+    if result.returncode:
+        pytest.fail(
+            "node behavior check failed"
+            f"\nexit code: {result.returncode}"
+            f"\nstdout:\n{result.stdout or '<empty>'}"
+            f"\nstderr:\n{result.stderr or '<empty>'}",
+        )
     return result.stdout.strip()
 
 
