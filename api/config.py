@@ -7743,6 +7743,7 @@ _SETTINGS_DEFAULTS = {
     "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
+    "provider_cost_budget": None,
 }
 _SETTINGS_LEGACY_DROP_KEYS = {
     "assistant_language",
@@ -8057,6 +8058,18 @@ def save_settings(settings: dict) -> dict:
                     seen.add(s)
                     cleaned.append(s)
                 v = cleaned
+            if k == "provider_cost_budget":
+                if v is None or v == "":
+                    current[k] = None
+                    continue
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if not (0 < v < 1e9) or not __import__("math").isfinite(v):
+                    continue
+                current[k] = round(v, 2)
+                continue
             # Coerce bool keys
             if k in _SETTINGS_BOOL_KEYS:
                 v = bool(v)
