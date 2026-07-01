@@ -1,10 +1,13 @@
 import copy
 import base64
 import hashlib
+import ipaddress
 import json
 import logging
+import math
 import os
 import secrets
+import socket
 import threading
 import time
 import urllib.error
@@ -34,6 +37,11 @@ _discovery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 _jwks_lock = threading.Lock()
 _jwks_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 class OIDCConfigError(Exception):
@@ -336,21 +344,26 @@ def _cache_put(
 
 
 def _fetch_json(url: str) -> dict[str, Any]:
+    _validate_outbound_oidc_url(url)
     req = urllib.request.Request(
         url,
         headers={"Accept": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
+        with _oidc_opener().open(req, timeout=10) as resp:
+            payload = json.loads(
+                resp.read().decode("utf-8"),
+                parse_constant=_reject_non_finite_json_constant,
+            )
+    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
         raise OIDCAuthError(f"Failed to reach OIDC endpoint: {url}", status_code=502) from exc
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, ValueError) as exc:
         raise OIDCAuthError(f"OIDC endpoint returned invalid JSON: {url}", status_code=502) from exc
     return payload if isinstance(payload, dict) else {}
 
 
 def _post_form_json(url: str, form_data: dict[str, Any]) -> dict[str, Any]:
+    _validate_outbound_oidc_url(url)
     body = urllib.parse.urlencode(form_data).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -362,13 +375,75 @@ def _post_form_json(url: str, form_data: dict[str, Any]) -> dict[str, Any]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
+        with _oidc_opener().open(req, timeout=10) as resp:
+            payload = json.loads(
+                resp.read().decode("utf-8"),
+                parse_constant=_reject_non_finite_json_constant,
+            )
+    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
         raise OIDCAuthError("Failed to exchange the OIDC authorization code", status_code=502) from exc
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, ValueError) as exc:
         raise OIDCAuthError("OIDC token endpoint returned invalid JSON", status_code=502) from exc
     return payload if isinstance(payload, dict) else {}
+
+
+def _oidc_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_NoRedirect)
+
+
+def _validate_outbound_oidc_url(url: str) -> None:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        raise OIDCAuthError("OIDC endpoint URLs must use https", status_code=502)
+    if parsed.username or parsed.password:
+        raise OIDCAuthError("OIDC endpoint URLs must not contain credentials", status_code=502)
+    hostname = str(parsed.hostname or "").strip()
+    if not hostname:
+        raise OIDCAuthError("OIDC endpoint URL was missing a hostname", status_code=502)
+    if _is_disallowed_oidc_host(hostname):
+        raise OIDCAuthError(
+            "OIDC endpoint URLs must not target private or local addresses",
+            status_code=502,
+        )
+
+
+def _is_disallowed_oidc_host(hostname: str) -> bool:
+    literal_ip = _parse_ip_address(hostname)
+    if literal_ip is not None:
+        return _is_disallowed_oidc_ip(literal_ip)
+    try:
+        infos = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    for info in infos:
+        sockaddr = info[4]
+        address = _parse_ip_address(sockaddr[0] if sockaddr else "")
+        if address is not None and _is_disallowed_oidc_ip(address):
+            return True
+    return False
+
+
+def _parse_ip_address(value: str):
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
+
+
+def _is_disallowed_oidc_ip(address) -> bool:
+    candidate = getattr(address, "ipv4_mapped", None) or address
+    return (
+        candidate.is_loopback
+        or candidate.is_private
+        or candidate.is_link_local
+        or candidate.is_multicast
+        or candidate.is_unspecified
+        or candidate.is_reserved
+    )
+
+
+def _reject_non_finite_json_constant(value: str):
+    raise ValueError(f"OIDC JSON contained unsupported constant: {value}")
 
 
 def _validate_id_token(
@@ -404,8 +479,14 @@ def _parse_jwt(token: str) -> tuple[dict[str, Any], dict[str, Any], bytes, bytes
         raise OIDCAuthError("OIDC id_token was not a JWT")
     header_b64, payload_b64, signature_b64 = parts
     try:
-        header = json.loads(_b64u_decode(header_b64))
-        claims = json.loads(_b64u_decode(payload_b64))
+        header = json.loads(
+            _b64u_decode(header_b64),
+            parse_constant=_reject_non_finite_json_constant,
+        )
+        claims = json.loads(
+            _b64u_decode(payload_b64),
+            parse_constant=_reject_non_finite_json_constant,
+        )
         signature = _b64u_decode_bytes(signature_b64)
     except Exception as exc:
         raise OIDCAuthError("OIDC id_token could not be decoded") from exc
@@ -438,13 +519,22 @@ def _select_public_key(jwks: dict[str, Any], header: dict[str, Any]):
         raise OIDCAuthError("OIDC JWKS did not contain the signing key for this id_token", status_code=502)
     return _jwk_to_public_key(matches[0])
 
+
 def _jwk_matches_alg_family(jwk: dict[str, Any], alg: str) -> bool:
     kty = str(jwk.get("kty") or "").strip()
     if alg.startswith("RS"):
         return kty == "RSA"
     if alg.startswith("ES"):
-        return kty == "EC"
+        return kty == "EC" and str(jwk.get("crv") or "").strip() == _ec_curve_for_alg(alg)
     return True
+
+
+def _ec_curve_for_alg(alg: str) -> str:
+    return {
+        "ES256": "P-256",
+        "ES384": "P-384",
+        "ES512": "P-521",
+    }.get(alg, "")
 
 
 def _jwk_to_public_key(jwk: dict[str, Any]):
@@ -540,9 +630,12 @@ def _coerce_numeric_claim(claims: dict[str, Any], name: str) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError) as exc:
         raise OIDCAuthError(f"OIDC id_token claim {name} was not numeric") from exc
+    if not math.isfinite(number):
+        raise OIDCAuthError(f"OIDC id_token claim {name} was not numeric")
+    return number
 
 
 def _enforce_allowlist(

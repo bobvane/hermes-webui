@@ -1,5 +1,6 @@
 import io
 import json
+import socket
 import time
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
@@ -479,3 +480,70 @@ def test_pending_oidc_flows_are_bounded(monkeypatch):
     auth_oidc._store_pending_flow("new", {"created_at": now, "nonce": "new"})
 
     assert set(auth_oidc._pending_flows) == {"middle", "new"}
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("file:///etc/hostname/.well-known/openid-configuration", "must use https"),
+        ("https://127.0.0.1/.well-known/openid-configuration", "private or local addresses"),
+    ],
+)
+def test_fetch_json_rejects_unsafe_oidc_urls(url, message):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    with pytest.raises(OIDCAuthError, match=message):
+        auth_oidc._fetch_json(url)
+
+
+def test_fetch_json_rejects_dns_resolved_private_hosts(monkeypatch):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.7", 443))
+        ],
+    )
+
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._fetch_json("https://issuer.example/.well-known/openid-configuration")
+
+
+def test_select_public_key_rejects_wrong_ec_curve_for_alg():
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    jwks = {"keys": [_ec_jwk(private_key, alg="ES384")]}
+
+    with pytest.raises(OIDCAuthError, match="did not contain the signing key"):
+        auth_oidc._select_public_key(jwks, {"alg": "ES384", "kid": "key-1"})
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_parse_jwt_rejects_non_finite_numeric_claims(value):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    header = auth_oidc._b64u(b'{"alg":"RS256"}')
+    claims = auth_oidc._b64u(
+        json.dumps({"exp": value}, separators=(",", ":")).encode("utf-8")
+    )
+    signature = auth_oidc._b64u(b"signature")
+    token = f"{header}.{claims}.{signature}"
+
+    with pytest.raises(OIDCAuthError, match="could not be decoded"):
+        auth_oidc._parse_jwt(token)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_coerce_numeric_claim_rejects_non_finite_values(value):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    with pytest.raises(OIDCAuthError, match="claim exp was not numeric"):
+        auth_oidc._coerce_numeric_claim({"exp": value}, "exp")
