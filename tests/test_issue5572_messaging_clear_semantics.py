@@ -70,7 +70,6 @@ def test_session_clear_preserves_imported_messaging_transcript_and_blocks_state_
     source_tag,
     source_label,
 ):
-    import api.models as models
     import api.routes as routes
     from api.models import Session, merge_session_messages_append_only
 
