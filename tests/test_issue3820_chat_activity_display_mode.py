@@ -631,6 +631,23 @@ def test_transparent_interrupted_status_on_settled_tools():
     permanent Running shimmer). (Trifecta O-Edge.)"""
     assert "function _transparentToolStatus(tc, settled)" in UI_JS
     assert "settled?'Interrupted':'Running'" in UI_JS
+    start = UI_JS.index("function _anchorSceneTransparentNodeForRow(row, opts){")
+    depth = 0
+    end = None
+    for idx in range(start, len(UI_JS)):
+        char = UI_JS[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx + 1
+                break
+    assert end is not None, "_anchorSceneTransparentNodeForRow body did not close"
+    body = UI_JS[start:end]
+    assert "else if(row.role==='tool')" in body
+    assert "_transparentToolStatus(toolCall,settled)" in body
+    assert "_transparentToolStatus(toolCall,true)" not in body
     assert "_transparentToolStatus(event.toolCall,true)" in UI_JS
 
 
