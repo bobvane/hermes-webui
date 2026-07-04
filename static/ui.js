@@ -5380,6 +5380,26 @@ function _messageBottomDistance(){
   if(!el) return 0;
   return el.scrollHeight-el.scrollTop-el.clientHeight;
 }
+// #5514/#5515: when the composer grows (typing multiple rows, Shift+Enter, a
+// multi-line paste / WisprFlow), the flex:1 `.messages` viewport shrinks by the
+// same delta. A reader pinned to the bottom is then stranded Δpx above it — the
+// transcript appears to "scroll up" one row per composer row, and (the #5515
+// half) it reads as a random upward jump during normal use. autoResize() only
+// resized the textarea; nothing re-pinned the transcript. Re-pin the bottom, but
+// ONLY when the reader is genuinely still pinned (sticky-unpin model: honor
+// _messageUserUnpinned so we never yank a reader who scrolled away, and never
+// fight a stream that already unpinned). Cheap no-op when not pinned.
+function _repinMessagesAfterComposerResize(){
+  if(_messageUserUnpinned || !_scrollPinned) return;
+  const el=$('messages');
+  if(!el) return;
+  // Already at/very near the bottom? nothing to do (avoids needless writes while
+  // idle-reading a short conversation that isn't scrollable).
+  if(_messageBottomDistance()<=1) return;
+  if(typeof _setMessageScrollToBottom==='function') _setMessageScrollToBottom();
+  else { el.scrollTop=el.scrollHeight; }
+}
+if(typeof window!=='undefined') window._repinMessagesAfterComposerResize=_repinMessagesAfterComposerResize;
 function _shouldFollowMessagesOnDomReplace(){
   // Final stream settlement replaces the live DOM with persisted messages. Keep
   // following only for users who are still pinned or effectively at the tail.
