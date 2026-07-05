@@ -1440,22 +1440,42 @@ async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, 
   await _saveComposerDraftNow(ownerSid,_steerRestoreText(originalMsg,explicitSteer),filesSnapshot);
 }
 
+// #5459 gate: cache successful steer uploads by owner session so a failed-steer
+// RETRY reuses the uploaded paths instead of re-uploading the same File objects.
+// Keyed by ownerSid; invalidated when the staged file set changes or on accepted
+// steer (see _steerUploadCacheMatches / clearing below).
+let _steerUploadCache = null; // { sid, sig, paths }
+function _steerFilesSignature(files){
+  try{
+    return (Array.isArray(files)?files:[]).map(f=>f&&(f.name+':'+(f.size||0)+':'+(f.lastModified||0))).join('|');
+  }catch(_){return String(Date.now());}
+}
+
 async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
   const base=String(msg||'').trim();
   const pendingFiles=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
   if(!pendingFiles.length)return base;
   if(typeof uploadPendingFiles!=='function')return base;
-  if(typeof setComposerStatus==='function')setComposerStatus(t('uploading')||'Uploading…');
-  let uploaded=[];
-  try{
-    // Keep File objects staged until /api/chat/steer confirms acceptance. If
-    // steer falls back, the draft and chips stay available for Queue/Interrupt.
-    uploaded=await uploadPendingFiles({clearPending:false,sessionId:ownerSid,files:pendingFiles});
-  }finally{
-    if(typeof setComposerStatus==='function')setComposerStatus('');
+  const sig=_steerFilesSignature(pendingFiles);
+  // Reuse a prior successful upload for the same session + identical staged file
+  // set (a steer that failed and is being retried) — don't upload twice.
+  let paths=null;
+  if(_steerUploadCache&&_steerUploadCache.sid===ownerSid&&_steerUploadCache.sig===sig&&Array.isArray(_steerUploadCache.paths)&&_steerUploadCache.paths.length){
+    paths=_steerUploadCache.paths;
+  }else{
+    if(typeof setComposerStatus==='function')setComposerStatus(t('uploading')||'Uploading…');
+    let uploaded=[];
+    try{
+      // Keep File objects staged until /api/chat/steer confirms acceptance. If
+      // steer falls back, the draft and chips stay available for Queue/Interrupt.
+      uploaded=await uploadPendingFiles({clearPending:false,sessionId:ownerSid,files:pendingFiles});
+    }finally{
+      if(typeof setComposerStatus==='function')setComposerStatus('');
+    }
+    paths=_steerUploadedAttachmentPaths(uploaded);
+    if(paths.length) _steerUploadCache={sid:ownerSid,sig,paths};
   }
-  const paths=_steerUploadedAttachmentPaths(uploaded);
-  if(!paths.length)return base;
+  if(!paths||!paths.length)return base;
   const note=`[Attached files for this steer: ${paths.join(', ')}]\nUse the file tools/read_file to inspect these documents if needed.`;
   return base?`${base}\n\n${note}`:note;
 }
@@ -1508,6 +1528,10 @@ async function _trySteer(msg, explicitSteer){
     result={accepted:false, fallback:'network_error'};
   }
   if(result&&result.accepted){
+    // The captured files+text were delivered to ownerSid — clear that session's
+    // draft (it may not be the live session anymore if the user switched during
+    // the upload/API await, which is fine: we're clearing the OWNER's draft).
+    _steerUploadCache=null; // delivered — invalidate the retry cache
     if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
     // Show a transient steer indicator in the chat (NOT in S.messages — it must
     // survive the done event's S.messages=d.session.messages replacement).
@@ -1515,7 +1539,13 @@ async function _trySteer(msg, explicitSteer){
     // all call renderMessages which rebuilds msgInner). Only mutate the visible
     // tray/DOM if the user is still looking at the owning session.
     if(_steerOwnerIsCurrent(ownerSid)){
-      if(typeof S!=='undefined'&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length){S.pendingFiles=[];if(typeof renderTray==='function')renderTray();}
+      // Remove ONLY the files we captured+delivered, by object identity, so any
+      // files staged during the upload/API await are preserved (#5459 gate).
+      if(typeof S!=='undefined'&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length&&pendingFilesSnapshot.length){
+        const _delivered=new Set(pendingFilesSnapshot);
+        const _remaining=S.pendingFiles.filter(f=>!_delivered.has(f));
+        if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
+      }
       _showSteerIndicator(steerText);
     }
     showToast(t('cmd_steer_delivered'),2500);

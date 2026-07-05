@@ -118,7 +118,7 @@ class TestSlashCommandHandlers:
         assert "cancelStream" not in helper_body
         assert "inp.value" in helper_body
         assert "if(result&&result.accepted)" in helper_body
-        assert "S.pendingFiles=[]" in helper_body
+        assert "S.pendingFiles=_remaining" in helper_body
         # Toast should differ from interrupt to signal it's the steer path
         assert "_steerFailureMessageKey" in helper_body or "steer_fail_" in helper_body
 
@@ -145,15 +145,20 @@ class TestSlashCommandHandlers:
             assert "renderTray()" in body, (
                 f"{fn_name} must call renderTray() after clearing pendingFiles"
             )
-        # cmdSteer delegates to _trySteer; the helper may clear files only on
-        # accepted steer. The fallback path restores the draft and keeps staged
-        # files available for the next explicit action.
+        # cmdSteer delegates to _trySteer; the helper clears files only on
+        # accepted steer, and (post-#5459-gate) removes ONLY the delivered files
+        # by identity so files staged during the upload await are preserved. The
+        # fallback path restores the draft and keeps staged files available.
         try_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
         accepted_idx = try_body.find("if(result&&result.accepted)")
         failure_idx = try_body.find("// Do not fall back to interrupt")
-        clear_idx = try_body.find("S.pendingFiles=[]", accepted_idx)
+        # Identity-based removal of the delivered snapshot on accepted steer.
+        clear_idx = try_body.find("S.pendingFiles=_remaining", accepted_idx)
         assert accepted_idx >= 0, "_trySteer must branch on accepted steer responses"
-        assert clear_idx > accepted_idx, "accepted steer should clear staged files"
+        assert clear_idx > accepted_idx, "accepted steer should clear the delivered staged files"
+        assert "_delivered=new Set(pendingFilesSnapshot)" in try_body, (
+            "accepted steer must remove only the delivered files by identity, preserving newly staged ones"
+        )
         assert failure_idx > clear_idx, "staged files must not be cleared in the failure path"
         assert "renderTray()" in try_body[failure_idx:]
 
@@ -334,7 +339,7 @@ class TestSendBusyBranchDispatch:
         try_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
         accepted_idx = try_body.find("if(result&&result.accepted)")
         failure_idx = try_body.find("// Do not fall back to interrupt")
-        clear_idx = try_body.find("S.pendingFiles=[]", accepted_idx)
+        clear_idx = try_body.find("S.pendingFiles=_remaining", accepted_idx)
         assert accepted_idx >= 0 and clear_idx > accepted_idx
         assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in try_body
         assert failure_idx > clear_idx, "failed steer must leave staged files intact"
@@ -356,6 +361,22 @@ class TestSendBusyBranchDispatch:
         assert "if(_text && _targetSid)" in guard
         assert "S.pendingFiles.length" not in guard
         assert "files:[...S.pendingFiles]" in guard
+
+    def test_steer_upload_is_cached_and_delivered_files_removed_by_identity(self):
+        """#5459 gate fixes: (1) a failed-steer RETRY reuses the cached upload
+        instead of re-uploading the same File objects; (2) accepted steer removes
+        ONLY the delivered files by identity, preserving files staged during the
+        upload/API await."""
+        try_body = _source_between(COMMANDS_JS, "async function _steerTextWithPendingFiles(", "\nasync function cmdTitle")
+        # (1) upload cache keyed by session + file signature, reused on retry,
+        # invalidated on delivery.
+        assert "_steerUploadCache" in try_body
+        assert "_steerFilesSignature(" in try_body
+        assert "_steerUploadCache={sid:ownerSid,sig,paths}" in try_body
+        assert "_steerUploadCache=null" in try_body
+        # (2) identity-based removal of only the delivered snapshot.
+        assert "_delivered=new Set(pendingFilesSnapshot)" in try_body
+        assert "S.pendingFiles=_remaining" in try_body
 
 
     def test_slash_commands_intercepted_before_busymode_routing(self):

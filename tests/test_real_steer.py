@@ -310,7 +310,7 @@ class TestFrontendWiring:
         )
         assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in body
         assert "if(_steerOwnerIsCurrent(ownerSid))" in body
-        assert "S.pendingFiles=[]" in body, "accepted steer should clear visible files only after paths are injected"
+        assert "S.pendingFiles=_remaining" in body, "accepted steer should clear the delivered files (by identity) after paths are injected"
 
     def test_file_steer_does_not_read_live_session_after_upload_await(self):
         cmds = self.cmds
