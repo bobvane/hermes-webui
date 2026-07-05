@@ -839,11 +839,17 @@ function _captureMessageViewportAnchor(){
     const rect=row.getBoundingClientRect();
     if(rect.bottom>containerRect.top+1){
       const sessionIdx=Number(row&&row.dataset&&row.dataset.sessionMsgIdx);
+      // Record the current top-spacer (virtual topPad) height so the compensation
+      // path can fall back to a topPad-delta shift when the anchor row itself is
+      // recycled out of the render window after a measurement-driven re-render.
+      const spacer=container.querySelector('[data-virtual-spacer="before"]');
+      const topPadBefore=spacer?parseFloat(spacer.style.height||'0')||0:0;
       return {
         rawIdx,
         sessionIdx:Number.isFinite(sessionIdx)?sessionIdx:_messageSessionIndexForRawIdx(rawIdx),
         key:row&&row.dataset?String(row.dataset.messageAnchorKey||''):'',
         topOffset:rect.top-containerRect.top,
+        topPadBefore,
       };
     }
   }
@@ -994,8 +1000,43 @@ function _compensateScrollForMeasurementDelta(renderFn){
     const spacer=container.querySelector('[data-virtual-spacer="before"]');
     if(!spacer||parseFloat(spacer.style.height||'0')<=0) return;
   }
-  const row=container.querySelector(`[data-msg-idx="${anchorBefore.rawIdx}"]`);
-  if(!row) return;
+  // Re-find the anchor row after the measurement-driven re-render. The primary
+  // lookup is by rawIdx (the DOM index), but on a big virtualized session a large
+  // scroll delta can RECYCLE the old anchor row out of the render window entirely
+  // (verified via real-device telemetry: DOM collapsed to 1 row, scrollHeight
+  // lurched by tens of thousands of px). The old code did `if(!row) return` here,
+  // abandoning compensation → the full estimated↔measured height lurch hit
+  // scrollTop uncompensated and threw the viewport to the top (the recurring
+  // mobile scroll jump-back). Fall back to the stable sessionIdx anchor (captured in
+  // _captureMessageViewportAnchor) before giving up, mirroring the "recover via
+  // sessionIdx when the primary anchor key is gone" approach used elsewhere but for
+  // the virtualization-measurement compensation path.
+  let row=container.querySelector(`[data-msg-idx="${anchorBefore.rawIdx}"]`);
+  if(!row&&Number.isFinite(Number(anchorBefore.sessionIdx))){
+    row=container.querySelector(`[data-session-msg-idx="${anchorBefore.sessionIdx}"]`);
+  }
+  if(!row){
+    // Anchor row is no longer rendered (recycled out of the virtual window). We
+    // cannot measure its live offset, but we CAN keep the viewport visually
+    // stable by compensating for the top-spacer (topPad) height change: the
+    // whole reason scrollHeight lurched is that the estimated topPad was replaced
+    // by a measured one. Shift scrollTop by that same delta so content under the
+    // viewport does not appear to jump. Without this the browser lands at an
+    // uncompensated absolute scrollTop against a wildly different scrollHeight.
+    const spacerAfter=container.querySelector('[data-virtual-spacer="before"]');
+    const topPadAfter=spacerAfter?parseFloat(spacerAfter.style.height||'0')||0:0;
+    const topPadBefore=Number(anchorBefore.topPadBefore);
+    if(Number.isFinite(topPadBefore)){
+      const padDelta=topPadAfter-topPadBefore;
+      if(Math.abs(padDelta)>=2){
+        _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+        container.scrollTop=Math.max(0,scrollTopBefore+padDelta);
+        _lastScrollTop=container.scrollTop;
+        _deferClearProgrammaticScroll();
+      }
+    }
+    return;
+  }
   const containerRect=container.getBoundingClientRect();
   const rowRect=row.getBoundingClientRect();
   const actualOffset=rowRect.top-containerRect.top;
@@ -12808,6 +12849,22 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   if(!restoredViaAnchor){
     const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
     const bottom=Number(snapshot.bottom);
+    // #5637: when the reader has scrolled UP into history (userUnpinned) and the
+    // semantic anchor restore failed, do NOT snap scrollTop to the captured
+    // ABSOLUTE snapshot.top. During streaming, the live activity-scene refresh
+    // fires this every tick; above-viewport height keeps changing, so the old
+    // absolute top no longer maps to the same content and the viewport is nudged
+    // backward by an amount that grows with scrollHeight. Leaving scrollTop
+    // untouched lets the browser's own scroll anchoring hold the reader's
+    // position. Pinned / near-bottom readers still get the tail-relative restore
+    // below (that path is correct and must run).
+    if(snapshot.userUnpinned===true&&snapshot.pinned!==true){
+      _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
+      _messageUserUnpinned=true;
+      _scrollPinned=false;
+      _nearBottomCount=0;
+      return;
+    }
     const target=(snapshot.pinned===true&&Number.isFinite(bottom))
       ? maxTop-Math.max(0,bottom)
       : Number(snapshot.top)||0;

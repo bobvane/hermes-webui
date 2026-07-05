@@ -5729,7 +5729,21 @@ main.main > #mainPlugin{display:none;}
    enough to avoid scrollHeight recalculation jumps that kill flick-scroll
    momentum on iOS. */
 @media (pointer: coarse) {
-  .msg-row { content-visibility: auto; contain-intrinsic-size: auto 1px; contain: layout style; }
+  /* #5637: content-visibility:auto is kept ONLY for user rows. Assistant rows can
+     contain very tall content (multi-thousand-px tool-result / long-answer rows),
+     and a flat `contain-intrinsic-size` cannot reserve their real off-screen
+     height: `1px` (or any single small value) collapses the reserved height of
+     every off-screen assistant row, so scrollHeight lurches down by tens of
+     thousands of px on a long transcript, the browser force-clamps scrollTop, and
+     the viewport jumps to the top (the mobile scroll jump-back). A value large
+     enough to reserve tall rows would reintroduce the scrollHeight churn the 1px
+     was chosen to avoid — so instead we gate content-visibility off for the tall
+     row class (assistant) and keep it for the short, size-predictable user rows,
+     which is where most of the off-screen-skip win comes from anyway. This mirrors
+     the existing "some rows must stay fully rendered" opt-out pattern for
+     #liveAssistantTurn below. */
+  .msg-row[data-role="user"] { content-visibility: auto; contain-intrinsic-size: auto 96px; contain: layout style; }
+  .msg-row { contain: layout style; }
   /* Keep the LIVE streaming turn fully rendered while a response streams. The
      live turn is always id="liveAssistantTurn" (assigned on every render path:
      Compact Worklog, Transparent Stream, restored-live, etc.), but ONLY the
