@@ -1574,6 +1574,12 @@ def _process_wakeup_pause_lane(model=None, provider=None) -> tuple[str, str]:
     try:
         resolved_model, resolved_provider = _cfg.canonical_model_provider_lane(model, provider)
     except Exception:
+        logger.debug(
+            "failed to canonicalize process_wakeup pause lane for model=%r provider=%r",
+            model,
+            provider,
+            exc_info=True,
+        )
         resolved_model, resolved_provider = None, None
     if resolved_model:
         model_part = _process_wakeup_pause_part(resolved_model)

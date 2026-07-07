@@ -6393,6 +6393,8 @@ def _run_agent_streaming(
     When ephemeral=True, session mutations are skipped — used by /btw to get
     a streaming answer without persisting to the parent session.
     """
+    _turn_route_model = model
+    _turn_route_provider = model_provider
     q = STREAMS.get(stream_id)
     if q is None:
         # The stream was cancelled before the worker started; the route layer
@@ -8733,13 +8735,12 @@ def _run_agent_streaming(
                             _err_type,
                             _err_hint,
                         )
-                        _pending_source = getattr(s, 'pending_user_source', None) or 'webui'
-                        if _pending_source == 'process_wakeup':
+                        if _turn_pending_source == 'process_wakeup':
                             record_process_wakeup_provider_unavailable_pause(
                                 s,
                                 classification=_err_type,
-                                model=resolved_model or model,
-                                provider=resolved_provider or provider_context or model_provider,
+                                model=_turn_route_model,
+                                provider=_turn_route_provider,
                             )
                         _materialize_pending_user_turn_before_error(s)
                         s.active_stream_id = None
@@ -9839,8 +9840,8 @@ def _run_agent_streaming(
                         _pause = record_process_wakeup_provider_unavailable_pause(
                             s,
                             classification=_exc_type,
-                            model=resolved_model or model,
-                            provider=resolved_provider or provider_context or model_provider,
+                            model=_turn_route_model,
+                            provider=_turn_route_provider,
                         )
                         if _pause is not None:
                             try:
@@ -9859,13 +9860,12 @@ def _run_agent_streaming(
                     )
                     return
 
-                _pending_source = getattr(s, 'pending_user_source', None) or 'webui'
-                if _pending_source == 'process_wakeup':
+                if _turn_pending_source == 'process_wakeup':
                     record_process_wakeup_provider_unavailable_pause(
                         s,
                         classification=_exc_type,
-                        model=resolved_model or model,
-                        provider=resolved_provider or provider_context or model_provider,
+                        model=_turn_route_model,
+                        provider=_turn_route_provider,
                     )
                 _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None

@@ -143,6 +143,56 @@ def _run_failing_process_wakeup(session: Session, tmp_path, *, stream_id=None):
     return [(item[0], item[1]) for item in list(fake_queue.queue)]
 
 
+def _run_failing_process_wakeup_route(
+    session: Session,
+    tmp_path,
+    *,
+    route_model,
+    route_provider=None,
+    resolved_model,
+    resolved_provider,
+    resolved_base_url=None,
+    custom_connection=(None, None),
+    stream_id=None,
+):
+    stream_id = str(stream_id or session.active_stream_id)
+    fake_queue = queue.Queue()
+    streaming.STREAMS[stream_id] = fake_queue
+    config.STREAM_PARTIAL_TEXT[stream_id] = ""
+
+    with mock.patch.object(streaming, "_get_ai_agent", return_value=_CredentialPoolEmptyAgent), \
+         mock.patch.object(
+             streaming,
+             "resolve_model_provider",
+             return_value=(resolved_model, resolved_provider, resolved_base_url),
+         ), \
+         mock.patch.object(
+             streaming,
+             "resolve_custom_provider_connection",
+             return_value=custom_connection,
+         ), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+        streaming._run_agent_streaming(
+            session_id=session.session_id,
+            msg_text=session.pending_user_message,
+            model=route_model,
+            model_provider=route_provider,
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+        )
+    return [(item[0], item[1]) for item in list(fake_queue.queue)]
+
+
+def _patch_process_wakeup_route(monkeypatch, tmp_path, *, model, provider):
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _p: (None, None, {}))
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_args, **_kwargs: (model, provider, False),
+    )
+
+
 def test_credential_empty_process_wakeup_pauses_repeated_automatic_turns(tmp_path, monkeypatch):
     session = Session(
         session_id="wakeup_pause",
@@ -618,6 +668,116 @@ def test_process_wakeup_pause_suppresses_custom_provider_single_segment_session(
     assert saved.process_wakeup_pause["model"] == "tag"
     assert saved.process_wakeup_pause["provider"] == "custom:proxy"
     assert saved.process_wakeup_pause["suppressed_count"] == 1
+
+
+def test_process_wakeup_pause_records_route_lane_after_custom_runtime_rewrite(tmp_path, monkeypatch):
+    session = Session(
+        session_id="wakeup_pause_custom_runtime_rewrite",
+        workspace=str(tmp_path),
+        model="@custom:proxy:model:tag",
+        model_provider=None,
+        messages=[{"role": "user", "content": "Earlier prompt", "timestamp": 1}],
+        context_messages=[{"role": "user", "content": "Earlier prompt"}],
+        active_stream_id="stream-custom-runtime-rewrite",
+        pending_user_message="[IMPORTANT: Background process first completed.]",
+        pending_started_at=1234.0,
+        pending_user_source="process_wakeup",
+    )
+    session.save()
+    models.SESSIONS[session.session_id] = session
+
+    events = _run_failing_process_wakeup_route(
+        session,
+        tmp_path,
+        route_model="@custom:proxy:model:tag",
+        route_provider=None,
+        resolved_model="model:tag",
+        resolved_provider="custom:proxy",
+        custom_connection=(None, "http://proxy.example/v1"),
+    )
+    saved = Session.load(session.session_id)
+    assert saved is not None
+    assert any(event == "apperror" and data["type"] == "credential_pool_empty" for event, data in events)
+    assert saved.process_wakeup_pause["model"] == "model:tag"
+    assert saved.process_wakeup_pause["provider"] == "custom:proxy"
+
+    def _unexpected_start_run(*_args, **_kwargs):
+        raise AssertionError("post-rewrite custom-provider wakeup must be suppressed")
+
+    _patch_process_wakeup_route(
+        monkeypatch,
+        tmp_path,
+        model="@custom:proxy:model:tag",
+        provider=None,
+    )
+    monkeypatch.setattr(routes, "_start_run", _unexpected_start_run)
+
+    response = routes.start_session_turn(
+        session.session_id,
+        "[IMPORTANT: Background process second completed.]",
+        source="process_wakeup",
+    )
+
+    assert response["_status"] == 409
+    assert response["error"] == PROCESS_WAKEUP_PAUSE_ERROR
+    saved_after = Session.load(session.session_id)
+    assert saved_after is not None
+    assert saved_after.process_wakeup_pause["suppressed_count"] == 1
+
+
+def test_process_wakeup_pause_records_unset_route_provider_before_runtime_backfill(tmp_path, monkeypatch):
+    monkeypatch.setitem(config.cfg, "model", {"default": "claude-sonnet-test"})
+    session = Session(
+        session_id="wakeup_pause_unset_route_provider",
+        workspace=str(tmp_path),
+        model="claude-sonnet-test",
+        model_provider=None,
+        messages=[{"role": "user", "content": "Earlier prompt", "timestamp": 1}],
+        context_messages=[{"role": "user", "content": "Earlier prompt"}],
+        active_stream_id="stream-unset-route-provider",
+        pending_user_message="[IMPORTANT: Background process first completed.]",
+        pending_started_at=1234.0,
+        pending_user_source="process_wakeup",
+    )
+    session.save()
+    models.SESSIONS[session.session_id] = session
+
+    events = _run_failing_process_wakeup_route(
+        session,
+        tmp_path,
+        route_model="claude-sonnet-test",
+        route_provider=None,
+        resolved_model="claude-sonnet-test",
+        resolved_provider=None,
+    )
+    saved = Session.load(session.session_id)
+    assert saved is not None
+    assert any(event == "apperror" and data["type"] == "credential_pool_empty" for event, data in events)
+    assert saved.process_wakeup_pause["model"] == "claude-sonnet-test"
+    assert saved.process_wakeup_pause["provider"] == ""
+
+    def _unexpected_start_run(*_args, **_kwargs):
+        raise AssertionError("runtime-provider backfill must not clear the paused route lane")
+
+    _patch_process_wakeup_route(
+        monkeypatch,
+        tmp_path,
+        model="claude-sonnet-test",
+        provider=None,
+    )
+    monkeypatch.setattr(routes, "_start_run", _unexpected_start_run)
+
+    response = routes.start_session_turn(
+        session.session_id,
+        "[IMPORTANT: Background process second completed.]",
+        source="process_wakeup",
+    )
+
+    assert response["_status"] == 409
+    assert response["error"] == PROCESS_WAKEUP_PAUSE_ERROR
+    saved_after = Session.load(session.session_id)
+    assert saved_after is not None
+    assert saved_after.process_wakeup_pause["suppressed_count"] == 1
 
 
 def test_stale_credential_empty_process_wakeup_still_records_pause(tmp_path):
