@@ -8543,6 +8543,8 @@ function _preferencesPayloadFromUi(){
   if(syncCb) payload.sync_to_insights=syncCb.checked;
   const updateCb=$('settingsCheckUpdates');
   if(updateCb) payload.check_for_updates=updateCb.checked;
+  const updateChannelSel=$('settingsUpdateChannel');
+  if(updateChannelSel) payload.update_channel=updateChannelSel.value;
   const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
   if(ignoreAgentUpdatesCb) payload.ignore_agent_updates=ignoreAgentUpdatesCb.checked;
   const whatsNewSummaryCb=$('settingsWhatsNewSummary');
@@ -8735,9 +8737,21 @@ async function loadSettingsPanel(){
     checkWebUIVersionSkew(settings);
     // Populate the version badges from the server — keeps them in sync with git
     // tags automatically without any manual release step.
+    //
+    // The DISPLAY badge uses update_channel_version (a channel-scoped
+    // `git describe --match`), which is SEPARATE from settings.webui_version.
+    // webui_version is load-bearing for asset cache-busting / SW cache / stale-
+    // client skew detection and must stay channel-neutral — never render it as
+    // the channel badge. See api/updates.channel_version_badge().
     const webuiBadge = $('settings-webui-version-badge');
     if(webuiBadge){
-      webuiBadge.textContent = `WebUI: ${settings.webui_version || 'not detected'}`;
+      const chanVer = settings.update_channel_version || settings.webui_version || 'not detected';
+      const chan = settings.update_channel==='experimental' ? 'experimental' : 'stable';
+      // Only annotate the channel when on experimental — stable is the implicit
+      // default and needs no extra chrome.
+      webuiBadge.textContent = chan==='experimental'
+        ? `WebUI: ${chanVer} · Experimental`
+        : `WebUI: ${chanVer}`;
     }
     const agentBadge = $('settings-agent-version-badge');
     if(agentBadge){
@@ -9128,6 +9142,24 @@ async function loadSettingsPanel(){
     if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const updateCb=$('settingsCheckUpdates');
     if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const updateChannelSel=$('settingsUpdateChannel');
+    if(updateChannelSel){
+      updateChannelSel.value=settings.update_channel==='experimental'?'experimental':'stable';
+      updateChannelSel.addEventListener('change',function(){
+        // Persist the channel, then invalidate the cached update check and
+        // re-check so the banner reflects the newly-selected channel. Changing
+        // the channel changes WHAT is offered, never WHAT is installed — the
+        // update banner still gates the actual apply behind "Update Now".
+        _schedulePreferencesAutosave();
+        if(typeof checkUpdatesNow==='function'){
+          // Pass the just-selected channel EXPLICITLY so the re-check cannot race
+          // the debounced autosave PUT and answer for the previous channel.
+          const _picked=updateChannelSel.value;
+          setTimeout(function(){try{checkUpdatesNow(_picked);}catch(e){}},400);
+        }
+        if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(updateChannelSel.value);
+      },{once:false});
+    }
     const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
     if(ignoreAgentUpdatesCb){ignoreAgentUpdatesCb.checked=!!settings.ignore_agent_updates;ignoreAgentUpdatesCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const whatsNewSummaryCb=$('settingsWhatsNewSummary');
@@ -11703,7 +11735,21 @@ function _applySavedSettingsUi(saved, body, opts){
   if(typeof renderSessionList==='function') renderSessionList();
 }
 
-async function checkUpdatesNow(){
+// Instant client-side badge feedback when the update channel is toggled, before
+// the server round-trip that authoritatively re-renders the badge from
+// update_channel_version. Keeps the "· Experimental" suffix in sync immediately.
+function _syncUpdateChannelBadge(channel){
+  try{
+    const badge=$('settings-webui-version-badge');
+    if(!badge) return;
+    let base=badge.textContent||'';
+    // Strip any existing " · Experimental" suffix, then re-append if needed.
+    base=base.replace(/\s·\sExperimental\s*$/,'');
+    badge.textContent = channel==='experimental' ? (base+' · Experimental') : base;
+  }catch(e){}
+}
+
+async function checkUpdatesNow(channelOverride){
   const btn=$('btnCheckUpdatesNow');
   const label=$('checkUpdatesLabel');
   const spinner=$('checkUpdatesSpinner');
@@ -11714,8 +11760,15 @@ async function checkUpdatesNow(){
   if(spinner) spinner.style.display='';
   if(label) label.textContent=t('settings_checking');
   if(status) status.textContent='';
+
   try {
-    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify({force:true}),timeoutMs:60000});
+    // Pass the channel explicitly when the caller has one (e.g. the dropdown
+    // just switched) so the check cannot race the debounced settings autosave
+    // and answer for the previous channel. Omit otherwise → server uses the
+    // saved setting. (Fable UX gate.)
+    const _checkBody={force:true};
+    if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
+    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:60000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
@@ -12268,6 +12321,7 @@ async function saveSettings(andClose){
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
+  body.update_channel=($('settingsUpdateChannel')||{}).value==='experimental'?'experimental':'stable';
   body.ignore_agent_updates=!!($('settingsIgnoreAgentUpdates')||{}).checked;
   body.whats_new_summary_enabled=!!($('settingsWhatsNewSummary')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;

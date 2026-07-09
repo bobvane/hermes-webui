@@ -1399,6 +1399,14 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_check_updates">Show a banner when newer versions of the WebUI or Agent are available. Runs a background git fetch periodically.</div>
             </div>
             <div class="settings-field">
+              <label for="settingsUpdateChannel" data-i18n="settings_label_update_channel">Update channel</label>
+              <select id="settingsUpdateChannel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="stable" data-i18n="settings_update_channel_stable">Stable (recommended)</option>
+                <option value="experimental" data-i18n="settings_update_channel_experimental">Experimental</option>
+              </select>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_update_channel">Stable gets soak-tested, proven releases. Experimental gets every release as it lands — faster, but may hit rough edges. Switching back to Stable keeps your current version until Stable catches up. Applies to WebUI updates only.</div>
+            </div>
+            <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsIgnoreAgentUpdates" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_ignore_agent_updates">Ignore Agent updates</span>
