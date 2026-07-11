@@ -3026,7 +3026,7 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 # importing from the agent tree (which may not be installed).  Any drift here
 # will show up in the shared test suite since both sides accept the same set.
 # Keep this WebUI-visible set aligned with hermes-agent#29248.
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def parse_reasoning_effort(effort):
@@ -3246,12 +3246,89 @@ def _filter_reasoning_efforts_for_provider(
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
-    if provider == "openai-codex":
+    # OpenAI-family lanes (Codex, direct OpenAI, Azure Foundry) cap GPT-5 at xhigh
+    # and o-series at high — 'max' is a WebUI-only level none of them accept.
+    if provider in {"openai-codex", "openai", "openai-api", "azure-foundry", "azure-openai", "azure"}:
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
         if bare.startswith("gpt-5"):
             return [eff for eff in normalized if eff != "max"]
+    # 'max' is a WebUI-level ceiling; providers whose native ladder tops out lower
+    # must NOT advertise it, otherwise a stored/CLI 'max' degrades WORSE than the
+    # prior max->xhigh coercion (Gemini's adapter treats unknown 'max' as medium;
+    # pre-adaptive Anthropic manual-thinking lacks a 'max' budget and falls to 8k).
+    # Dropping 'max' here lets the existing downgrade ladder land on xhigh/high.
+    if provider in {"gemini", "google", "google-gemini", "google-vertex", "vertex"}:
+        return [eff for eff in normalized if eff != "max"]
+    # Legacy Claude is pre-adaptive whether served natively OR via Azure Foundry /
+    # Bedrock / Vertex — the ceiling follows the MODEL, not just the provider name.
+    _anthropic_lanes = {
+        "anthropic", "claude", "anthropic-claude",
+        "azure-foundry", "azure-openai", "azure", "bedrock", "aws-bedrock",
+        "vertex", "google-vertex",
+    }
+    if provider in _anthropic_lanes and "claude" in bare and _is_pre_adaptive_anthropic(bare):
+        return [eff for eff in normalized if eff != "max"]
     return normalized
+
+
+_KNOWN_REASONING_PROVIDERS = frozenset({
+    "anthropic", "claude", "anthropic-claude",
+    "openai", "openai-api", "openai-codex",
+    "azure", "azure-openai", "azure-foundry",
+    "bedrock", "aws-bedrock", "vertex", "google-vertex",
+    "gemini", "google", "google-gemini",
+    "deepseek", "x-ai", "xai", "grok",
+    "copilot", "github-copilot", "openrouter",
+})
+
+
+def _provider_known_reasoning_capable(provider_id) -> bool:
+    """True if the provider is one we recognize as reasoning-capable.
+
+    Used to gate the 'max' default-deny: for a RECOGNIZED provider whose specific
+    model we couldn't resolve (empty capability list), preserve 'max' since those
+    providers genuinely support it; for a truly unknown/custom provider, degrade
+    'max' -> 'xhigh' so we never send a supra-ceiling level that would 400.
+    """
+    prov = _resolve_provider_alias(str(provider_id or "").strip().lower())
+    return prov in _KNOWN_REASONING_PROVIDERS
+
+
+def _is_pre_adaptive_anthropic(bare_model: str) -> bool:
+    """True for Claude models that predate the adaptive-thinking (4.6+) generation.
+
+    Adaptive models (Opus/Sonnet 4.6+, 4.7, …) accept 'max'; earlier manual-thinking
+    Claudes (3.x and 4.0–4.5) do not and must degrade 'max' to xhigh rather than
+    fall through the manual-thinking budget table to its 8k default.
+
+    Handles the ID shapes the Anthropic adapter uses:
+      - claude-3-opus / claude-3-5-sonnet / claude-3-7-sonnet   → pre-adaptive
+      - claude-sonnet-4-5 / claude-haiku-4-5                     → pre-adaptive (4.5)
+      - claude-sonnet-4-20250514 (date-stamped 4.0 build)        → pre-adaptive
+      - claude-opus-4.6 / claude-sonnet-4.6 / claude-opus-4.7    → adaptive
+      - claude-opus-latest / unversioned                        → adaptive (flagship)
+    """
+    import re as _re
+    m = (bare_model or "").lower()
+    if "claude" not in m:
+        return False
+    # Claude 3.x family is always pre-adaptive.
+    if _re.search(r"claude-3\b", m) or _re.search(r"claude-3[.\-]", m):
+        return True
+    # Find a major[.-]minor version. A date-stamp (>=6 digits) is NOT a minor
+    # version — treat "4-20250514" as major 4 with no real minor (a 4.0 build).
+    match = _re.search(r"(\d+)[.\-](\d{1,2})(?!\d)", m)
+    if not match:
+        # A bare major like "claude-sonnet-4" or "...-4-20250514" (date stamp
+        # consumed no minor): major-4 with no minor is a pre-adaptive 4.0 build.
+        major_only = _re.search(r"[-.](\d+)(?:[-.]\d{6,})?(?:\b|-)", m)
+        if major_only:
+            return int(major_only.group(1)) < 5  # 4.x (no minor) → pre-adaptive; ≥5 → adaptive
+        # Unversioned / *-latest → treat as current flagship (adaptive).
+        return False
+    major, minor = int(match.group(1)), int(match.group(2))
+    return (major, minor) < (4, 6)
 
 
 def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
@@ -3513,6 +3590,35 @@ def resolve_model_reasoning_efforts(
     provider_id: str | None = None,
     base_url: str | None = None,
 ) -> list[str]:
+    """Return supported reasoning-effort levels for *model_id*, or [] if none.
+
+    Always passes the sourced list through _filter_reasoning_efforts_for_provider
+    so the hard provider ceilings (openai-codex/openai/azure GPT-5 cap at xhigh,
+    Gemini + pre-adaptive/cloud-hosted Claude cap at xhigh) are applied uniformly
+    — the UI dropdown (which gates options on this list) and coercion therefore
+    agree: 'max' is offered ONLY for models whose native ladder genuinely includes
+    it, and is stripped everywhere it would be rejected/mishandled.
+    """
+    raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
+    if not raw:
+        return raw
+    # Preserve any explicit 'none' sentinel (valid UI option = "no reasoning");
+    # the ceiling filter only knows the reasoning LEVELS.
+    had_none = "none" in raw
+    filtered = _filter_reasoning_efforts_for_provider(
+        [e for e in raw if e != "none"], str(model_id or ""), str(provider_id or "")
+    )
+    if had_none:
+        # Keep 'none' in its original leading position if it was there.
+        return ["none", *filtered] if raw and raw[0] == "none" else [*filtered, "none"]
+    return filtered
+
+
+def _resolve_model_reasoning_efforts_impl(
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none."""
     model = str(model_id or "").strip()
     if not model:
@@ -3631,9 +3737,6 @@ def coerce_reasoning_effort_for_model(
         return ""
     if raw == "none":
         return "none"
-    accepts_max_as_xhigh = raw == "max"
-    if accepts_max_as_xhigh:
-        raw = "xhigh"
     if raw not in VALID_REASONING_EFFORTS:
         return ""
     supported = resolve_model_reasoning_efforts(
@@ -3641,6 +3744,32 @@ def coerce_reasoning_effort_for_model(
         provider_id=provider_id,
         base_url=base_url,
     )
+    # Hard provider ceilings must win regardless of what the sourced capability
+    # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
+    # models.dev / heuristics, and those can (a) return [] for an unrecognized
+    # model or (b) wrongly advertise a WebUI-only level like 'max' for a provider
+    # whose native ladder tops out lower. _filter_reasoning_efforts_for_provider
+    # encodes the known ceilings (openai-codex gpt-5, Gemini, pre-adaptive
+    # Anthropic all cap below 'max'); if it actively EXCLUDES the requested level,
+    # honor that ceiling and degrade down the ladder even when the sourced list is
+    # empty or (mistakenly) includes the level. This keeps a stored/CLI 'max' from
+    # reaching an adapter that would silently downgrade it worse than xhigh/high
+    # (Gemini→medium, legacy Claude manual-thinking→8k). For providers with NO
+    # ceiling rule the filter returns the full list unchanged, so genuinely
+    # unknown models still preserve the configured effort (#3505 behavior).
+    ceiling = _filter_reasoning_efforts_for_provider(
+        list(VALID_REASONING_EFFORTS), str(model_id or ""), str(provider_id or "")
+    )
+    if ceiling and raw not in ceiling:
+        ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max
+        try:
+            raw_idx = ladder.index(raw)
+        except ValueError:
+            raw_idx = None
+        if raw_idx is not None:
+            for level in reversed(ladder[:raw_idx]):  # strictly lower, highest first
+                if level in ceiling:
+                    return level
     # An empty list is ambiguous: resolve_model_reasoning_efforts() returns []
     # both for models KNOWN not to support reasoning AND for models we simply
     # don't recognize (custom providers, aggregator-rewritten ids, brand-new
@@ -3649,17 +3778,28 @@ def coerce_reasoning_effort_for_model(
     # those paths return a NON-empty clamped set, so the degrade ladder below
     # still applies. When the set is empty we can't tell "unsupported" from
     # "unknown", so preserve the user's configured effort verbatim where it is
-    # still valid. A stale 'max' value is no longer parser-valid on the WebUI
-    # side, so degrade that unknown-model case to xhigh instead of silently
-    # dropping reasoning later in parse_reasoning_effort(). (#3505 review)
+    # still valid. (#3505 review)
+    #
+    # EXCEPTION for 'max' (the #3505 default-deny refinement, maintainer call
+    # 2026-07-11): 'max' is a WebUI-only level ABOVE the universally-safe ceiling
+    # 'xhigh'. A genuinely unknown/custom provider will 400 on it. So when the
+    # capability list is empty AND the provider is not one we recognize as
+    # reasoning-capable, degrade 'max' -> 'xhigh' rather than send an unsupported
+    # supra-ceiling level. But do NOT degrade for a RECOGNIZED reasoning provider
+    # whose specific model id we simply couldn't resolve (e.g. claude-opus-latest,
+    # a brand-new adaptive id) — those genuinely support 'max', and the ceiling
+    # filter above already stripped it for any KNOWN-capped model. All other
+    # levels (minimal..xhigh) keep the conservative preserve-verbatim behavior.
     if not supported:
-        return "xhigh" if accepts_max_as_xhigh else raw
+        if raw == "max" and not _provider_known_reasoning_capable(provider_id):
+            return "xhigh"
+        return raw
     if raw in supported:
-        return "xhigh" if accepts_max_as_xhigh else raw
+        return raw
     # Degrade to the closest *lower* supported level instead of silently
     # disabling reasoning. e.g. max -> xhigh -> high, or xhigh -> high when the
     # target model caps below the configured effort. Never escalate.
-    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh
+    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max
     try:
         raw_idx = ladder.index(raw)
     except ValueError:
@@ -3712,10 +3852,8 @@ def get_reasoning_status(
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
-        # Report the COERCED effort (not the raw config value) so boot/status/chip
-        # read paths agree with what streaming actually sends — e.g. a stale
-        # `reasoning_effort: max` surfaces as `xhigh`, not the now-unsupported `max`.
-        # (Codex review of the drop-max alignment.)
+        # Report the COERCED effort so boot/status/chip read paths agree with
+        # what streaming actually sends. (Codex review of the drop-max alignment.)
         "reasoning_effort": coerce_reasoning_effort_for_model(
             str(effort_raw or "").strip().lower(),
             resolve_model,
@@ -3834,7 +3972,7 @@ def set_reasoning_effort(
     """Persist ``agent.reasoning_effort`` to the active profile's config.yaml.
 
     Mirrors CLI ``/reasoning <level>``: same key, same valid values
-    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh``).
+    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
     Raises ``ValueError`` on an unrecognised level so callers can return 400.
     """
     raw = str(effort or "").strip().lower()
