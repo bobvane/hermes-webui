@@ -3251,7 +3251,36 @@ def _filter_reasoning_efforts_for_provider(
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
         if bare.startswith("gpt-5"):
             return [eff for eff in normalized if eff != "max"]
+    # 'max' is a WebUI-level ceiling; providers whose native ladder tops out lower
+    # must NOT advertise it, otherwise a stored/CLI 'max' degrades WORSE than the
+    # prior max->xhigh coercion (Gemini's adapter treats unknown 'max' as medium;
+    # pre-adaptive Anthropic manual-thinking lacks a 'max' budget and falls to 8k).
+    # Dropping 'max' here lets the existing downgrade ladder land on xhigh/high.
+    if provider in {"gemini", "google", "google-gemini", "google-vertex", "vertex"}:
+        return [eff for eff in normalized if eff != "max"]
+    if provider in {"anthropic", "claude", "anthropic-claude"} and _is_pre_adaptive_anthropic(bare):
+        return [eff for eff in normalized if eff != "max"]
     return normalized
+
+
+def _is_pre_adaptive_anthropic(bare_model: str) -> bool:
+    """True for Claude models that predate the adaptive-thinking (4.6+) generation.
+
+    Adaptive models (Opus/Sonnet 4.6+, 4.7, …) accept 'max'; earlier manual-thinking
+    Claudes (3.5/3.7/4.0–4.5) do not and must degrade 'max' to xhigh rather than
+    fall through the manual-thinking budget table to its 8k default.
+    """
+    m = (bare_model or "").lower()
+    if "claude" not in m:
+        return False
+    # Extract a version like 4.6 / 4-5 / 3.7 from the model name.
+    import re as _re
+    match = _re.search(r"(\d+)[.\-](\d+)", m)
+    if not match:
+        # Unversioned/opus-latest style — treat as adaptive (current flagship).
+        return False
+    major, minor = int(match.group(1)), int(match.group(2))
+    return (major, minor) < (4, 6)
 
 
 def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
@@ -3638,6 +3667,32 @@ def coerce_reasoning_effort_for_model(
         provider_id=provider_id,
         base_url=base_url,
     )
+    # Hard provider ceilings must win regardless of what the sourced capability
+    # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
+    # models.dev / heuristics, and those can (a) return [] for an unrecognized
+    # model or (b) wrongly advertise a WebUI-only level like 'max' for a provider
+    # whose native ladder tops out lower. _filter_reasoning_efforts_for_provider
+    # encodes the known ceilings (openai-codex gpt-5, Gemini, pre-adaptive
+    # Anthropic all cap below 'max'); if it actively EXCLUDES the requested level,
+    # honor that ceiling and degrade down the ladder even when the sourced list is
+    # empty or (mistakenly) includes the level. This keeps a stored/CLI 'max' from
+    # reaching an adapter that would silently downgrade it worse than xhigh/high
+    # (Gemini→medium, legacy Claude manual-thinking→8k). For providers with NO
+    # ceiling rule the filter returns the full list unchanged, so genuinely
+    # unknown models still preserve the configured effort (#3505 behavior).
+    ceiling = _filter_reasoning_efforts_for_provider(
+        list(VALID_REASONING_EFFORTS), str(model_id or ""), str(provider_id or "")
+    )
+    if ceiling and raw not in ceiling:
+        ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max
+        try:
+            raw_idx = ladder.index(raw)
+        except ValueError:
+            raw_idx = None
+        if raw_idx is not None:
+            for level in reversed(ladder[:raw_idx]):  # strictly lower, highest first
+                if level in ceiling:
+                    return level
     # An empty list is ambiguous: resolve_model_reasoning_efforts() returns []
     # both for models KNOWN not to support reasoning AND for models we simply
     # don't recognize (custom providers, aggregator-rewritten ids, brand-new

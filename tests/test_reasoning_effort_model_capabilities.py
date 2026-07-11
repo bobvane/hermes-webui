@@ -327,3 +327,33 @@ def test_get_reasoning_status_coerces_stale_max_to_xhigh(monkeypatch):
     )
     assert status["reasoning_effort"] == "xhigh"
     assert status["reasoning_effort"] != "max"
+
+
+def test_max_effort_degrades_to_xhigh_for_gemini():
+    # Gemini's native ladder tops out below 'max'; its adapter would silently
+    # treat an unknown 'max' as medium. A stored/CLI 'max' must degrade to xhigh
+    # (the highest supported), not fall through to a worse level. (#4627 gate)
+    for model in ("gemini-3-pro", "gemini-3-flash"):
+        assert cfg.coerce_reasoning_effort_for_model(
+            "max", model_id=model, provider_id="gemini"
+        ) == "xhigh", f"{model} max must degrade to xhigh"
+
+
+def test_max_effort_degrades_to_xhigh_for_pre_adaptive_anthropic():
+    # Pre-adaptive Claude (3.7 / 4.0-4.5) uses manual thinking whose budget table
+    # lacks 'max' and falls back to 8k; 'max' must degrade to xhigh instead. (#4627 gate)
+    for model in ("claude-3-7-sonnet", "claude-sonnet-4-5"):
+        assert cfg.coerce_reasoning_effort_for_model(
+            "max", model_id=model, provider_id="anthropic"
+        ) == "xhigh", f"{model} max must degrade to xhigh"
+
+
+def test_max_effort_preserved_for_adaptive_anthropic_and_deepseek():
+    # Adaptive Claude (4.6+) and DeepSeek genuinely support 'max' — it must NOT degrade.
+    for model in ("claude-opus-4.6", "claude-opus-4.7"):
+        assert cfg.coerce_reasoning_effort_for_model(
+            "max", model_id=model, provider_id="anthropic"
+        ) == "max", f"{model} must preserve max"
+    assert cfg.coerce_reasoning_effort_for_model(
+        "max", model_id="deepseek-reasoner", provider_id="deepseek"
+    ) == "max"
