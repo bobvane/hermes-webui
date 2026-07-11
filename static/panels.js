@@ -8230,10 +8230,16 @@ function _syncHermesPanelSessionActions(){
   const visibleMessages=hasSession?(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool').length:0;
   const title=hasSession?(S.session.title||t('untitled')):t('active_conversation_none');
   const meta=$('hermesSessionMeta');
+  const hasShare=!!(hasSession&&S.session&&S.session.share_token);
   if(meta){
-    meta.textContent=hasSession
-      ? t('active_conversation_meta', title, visibleMessages)
-      : t('active_conversation_none');
+    if(!hasSession){
+      meta.textContent=t('active_conversation_none');
+    }else{
+      const base=t('active_conversation_meta', title, visibleMessages);
+      meta.textContent=hasShare
+        ? `${base} · ${t('share_session_status_active')}`
+        : base;
+    }
   }
   const setDisabled=(id,disabled)=>{
     const el=$(id);
@@ -8243,6 +8249,8 @@ function _syncHermesPanelSessionActions(){
   };
   setDisabled('btnDownload',!hasSession||visibleMessages===0);
   setDisabled('btnExportJSON',!hasSession);
+  setDisabled('btnShareSession',!hasSession||visibleMessages===0);
+  setDisabled('btnStopSharingSession',!hasShare);
   setDisabled('btnClearConvModal',!hasSession||visibleMessages===0);
 }
 
